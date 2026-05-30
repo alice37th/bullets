@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>斑鳩：ラフレシア砲台シミュレータ</title>
+</head>
+
+<body>
+  <header style="display:flex;justify-content: space-between;align-items: center;">
+    <h1>
+      斑鳩：ラフレシア砲台シミュレータ
+    </h1>
+    <div style="display:flex; flex-wrap:wrap; gap:10px 14px; align-items:center; margin-bottom:12px;">
+      <button id="toggle" style="width:auto;">一時停止</button>
+      <button id="reset" style="width:auto;">リセット</button>
+      <label style="font-size:13px; color:var(--color-text-secondary); display:flex; align-items:center; gap:8px;">台座回転
+        <input type="range" id="rot" min="0" max="100" value="25" step="1" style="width:80px;">
+        <span id="rotV" style="font-size:12px; color:var(--color-text-primary); min-width:84px;"></span>
+      </label>
+      <label style="font-size:13px; color:var(--color-text-secondary); display:flex; align-items:center; gap:8px;">黒照準掃引
+        <input type="range" id="baim" min="0" max="100" value="25" step="1" style="width:80px;">
+        <span id="baimV" style="font-size:12px; color:var(--color-text-primary); min-width:84px;"></span>
+      </label>
+      <label style="font-size:13px; color:var(--color-text-secondary); display:flex; align-items:center; gap:8px;">弾速
+        <input type="range" id="spd" min="20" max="160" value="70" step="1" style="width:80px;">
+        <span id="spdV" style="font-size:12px; color:var(--color-text-primary); min-width:84px;"></span>
+      </label>
+      <label style="font-size:13px; color:var(--color-text-secondary); display:flex; align-items:center; gap:8px;">発射頻度
+        <input type="range" id="rate" min="20" max="160" value="100" step="1" style="width:80px;">
+        <span id="rateV" style="font-size:12px; color:var(--color-text-primary); min-width:96px;"></span>
+      </label>
+    </div>
+  </header>
+  <div style="position:relative; width:100%; max-width:520px; margin:0 auto;">
+    <canvas id="cv"
+      style="width:100%; display:block; background:#0a0a0f; border-radius:var(--border-radius-lg); border:0.5px solid var(--color-border-tertiary); touch-action:none; cursor:crosshair;"></canvas>
+  </div>
+
+  <script>
+    (function () {
+      const cv = document.getElementById('cv');
+      const W = 480, H = 700;
+      cv.width = W; cv.height = H;
+      const ctx = cv.getContext('2d');
+
+      const rotS = document.getElementById('rot');
+      const baimS = document.getElementById('baim');
+      const spdS = document.getElementById('spd');
+      const rateS = document.getElementById('rate');
+      const rotV = document.getElementById('rotV');
+      const baimV = document.getElementById('baimV');
+      const spdV = document.getElementById('spdV');
+      const rateV = document.getElementById('rateV');
+      const toggleBtn = document.getElementById('toggle');
+      const resetBtn = document.getElementById('reset');
+
+      const COL = { 1: '#f2f2f2', 0: '#ff4d57' };
+      const GLOW = { 1: '#aab4ff', 0: '#7a1320' };
+      const ARMS = 10;
+
+      let bullets = [];
+      let baseAngle = 0;
+      let blackAim = 0;
+      let fireAcc = 0;
+      let running = true;
+
+      const boss = { x: W / 2, y: 130, r: 36 };
+      const player = { x: W / 2, y: H - 80, polarity: 1, r: 7, hit: 0 };
+
+      function reset() { bullets = []; baseAngle = 0; blackAim = 0; fireAcc = 0; }
+
+      // derived values (single source of truth, also used for readouts)
+      function pedestalSpeed() { return parseInt(rotS.value) / 100 * 0.04; }   // rad/frame
+      function aimSpeed() { return parseInt(baimS.value) / 100 * 0.06; }       // rad/frame
+      function bulletSpeed() { return parseInt(spdS.value) / 100 * 2.2 + 0.6; }// px/frame
+      function fireInterval() { return (170 - parseInt(rateS.value)) / 16; } // frames between rings
+
+      function updateReadouts() {
+        rotV.textContent = rotS.value + '  (' + pedestalSpeed().toFixed(4) + ' rad/f)';
+        baimV.textContent = baimS.value + '  (' + aimSpeed().toFixed(4) + ' rad/f)';
+        spdV.textContent = spdS.value + '  (' + bulletSpeed().toFixed(2) + ' px/f)';
+        const fps = (fireInterval() > 0) ? (60 / fireInterval()) : 60;
+        rateV.textContent = rateS.value + '  (' + fps.toFixed(1) + ' 回/秒)';
+      }
+      [rotS, baimS, spdS, rateS].forEach(s => s.addEventListener('input', updateReadouts));
+      updateReadouts();
+
+      function spawnRings() {
+        const speed = bulletSpeed();
+        for (let i = 0; i < ARMS; i++) {
+          const pos = baseAngle + (i / ARMS) * Math.PI * 2;
+          bullets.push(mk(pos, pos, speed, 1));
+        }
+        for (let i = 0; i < ARMS; i++) {
+          const pos = baseAngle + (i / ARMS) * Math.PI * 2 + Math.PI / ARMS;
+          const aim = pos + blackAim;
+          bullets.push(mk(pos, aim, speed, 0));
+        }
+      }
+      function mk(posAng, aimAng, speed, p) {
+        return {
+          x: boss.x + Math.cos(posAng) * boss.r,
+          y: boss.y + Math.sin(posAng) * boss.r,
+          vx: Math.cos(aimAng) * speed,
+          vy: Math.sin(aimAng) * speed,
+          ang: aimAng,
+          p, r: 5
+        };
+      }
+
+      function setFromPointer(cx, cy) {
+        const rect = cv.getBoundingClientRect();
+        const x = (cx - rect.left) * (W / rect.width);
+        const y = (cy - rect.top) * (H / rect.height);
+        if (y > H * 0.45) { player.x = Math.max(player.r, Math.min(W - player.r, x)); player.y = Math.max(H * 0.45, Math.min(H - player.r, y)); }
+      }
+      cv.addEventListener('pointermove', e => setFromPointer(e.clientX, e.clientY));
+      cv.addEventListener('pointerdown', e => { player.polarity = 1 - player.polarity; setFromPointer(e.clientX, e.clientY); });
+      toggleBtn.addEventListener('click', () => { running = !running; toggleBtn.textContent = running ? '一時停止' : '再生'; });
+      resetBtn.addEventListener('click', reset);
+
+      function step(dt) {
+        baseAngle -= pedestalSpeed() * dt;
+        blackAim += aimSpeed() * dt;
+        fireAcc += dt;
+        if (fireAcc >= fireInterval()) { spawnRings(); fireAcc = 0; }
+
+        for (const b of bullets) { b.x += b.vx * dt; b.y += b.vy * dt; }
+        bullets = bullets.filter(b => {
+          const dx = b.x - player.x, dy = b.y - player.y;
+          if (dx * dx + dy * dy < (b.r + player.r) * (b.r + player.r)) {
+            if (b.p === player.polarity) return false;
+            player.hit = 8; return false;
+          }
+          return b.x > -20 && b.x < W + 20 && b.y > -20 && b.y < H + 20;
+        });
+        if (player.hit) player.hit--;
+      }
+
+      function drawTeardrop(b) {
+        const len = 13, halfW = 2.2;
+        ctx.save();
+        ctx.translate(b.x, b.y);
+        ctx.rotate(b.ang + Math.PI);
+        ctx.beginPath();
+        ctx.moveTo(len * 0.62, 0);
+        ctx.quadraticCurveTo(0, halfW, -len * 0.38, halfW * 0.78);
+        ctx.arc(-len * 0.38, 0, halfW * 0.78, Math.PI * 0.5, Math.PI * 1.5, false);
+        ctx.quadraticCurveTo(0, -halfW, len * 0.62, 0);
+        ctx.closePath();
+        ctx.fillStyle = GLOW[b.p]; ctx.globalAlpha = 0.35;
+        ctx.save(); ctx.scale(1.25, 1.6); ctx.fill(); ctx.restore();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = COL[b.p]; ctx.fill();
+        ctx.beginPath();
+        ctx.arc(-len * 0.3, -0.4, halfW * 0.35, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,255,255,0.65)'; ctx.fill();
+        ctx.restore();
+      }
+
+      function draw() {
+        ctx.fillStyle = '#0a0a0f'; ctx.fillRect(0, 0, W, H);
+        const g = ctx.createRadialGradient(boss.x, boss.y, 10, boss.x, boss.y, 260);
+        g.addColorStop(0, 'rgba(60,40,80,0.25)'); g.addColorStop(1, 'rgba(10,10,15,0)');
+        ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+        ctx.save(); ctx.translate(boss.x, boss.y); ctx.rotate(baseAngle);
+        for (let layer = 0; layer < 2; layer++) {
+          ctx.beginPath();
+          const petals = 5, rr = boss.r - layer * 10;
+          for (let k = 0; k <= 64; k++) {
+            const a = k / 64 * Math.PI * 2, rad = rr * (0.78 + 0.22 * Math.cos(petals * a));
+            const px = Math.cos(a) * rad, py = Math.sin(a) * rad;
+            k === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+          }
+          ctx.closePath(); ctx.fillStyle = layer ? '#caa12f' : '#7a2e3a'; ctx.fill();
+        }
+        for (let i = 0; i < ARMS; i++) {
+          ctx.save(); ctx.rotate((i / ARMS) * Math.PI * 2);
+          ctx.fillStyle = COL[1]; ctx.globalAlpha = 0.9; ctx.fillRect(boss.r - 6, -2, 12, 4); ctx.restore();
+        }
+        for (let i = 0; i < ARMS; i++) {
+          ctx.save(); ctx.rotate((i / ARMS) * Math.PI * 2 + Math.PI / ARMS);
+          ctx.fillStyle = COL[0]; ctx.globalAlpha = 0.9; ctx.fillRect(boss.r - 6, -2, 12, 4);
+          ctx.rotate(blackAim);
+          ctx.fillStyle = 'rgba(255,77,87,0.5)'; ctx.fillRect(boss.r + 2, -1, 8, 2);
+          ctx.restore();
+        }
+        ctx.globalAlpha = 1;
+        ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI * 2); ctx.fillStyle = '#1a0e12'; ctx.fill();
+        ctx.restore();
+
+        for (const b of bullets) { drawTeardrop(b); }
+
+        ctx.save(); ctx.translate(player.x, player.y);
+        ctx.beginPath(); ctx.arc(0, 0, player.r + 6, 0, Math.PI * 2);
+        ctx.fillStyle = GLOW[player.polarity]; ctx.globalAlpha = player.hit ? 0.9 : 0.35; ctx.fill(); ctx.globalAlpha = 1;
+        ctx.beginPath(); ctx.moveTo(0, -player.r - 2); ctx.lineTo(player.r, player.r); ctx.lineTo(0, player.r * 0.4); ctx.lineTo(-player.r, player.r);
+        ctx.closePath(); ctx.fillStyle = player.hit ? '#fff' : COL[player.polarity]; ctx.fill(); ctx.restore();
+
+        ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.font = '12px sans-serif';
+        ctx.fillText('弾数: ' + bullets.length, 10, 18);
+        ctx.fillText('自機属性: ' + (player.polarity ? '白' : '黒(赤)'), 10, H - 10);
+      }
+
+      let last = performance.now();
+      function loop(now) {
+        const dt = Math.min(2.5, (now - last) / 16.67); last = now;
+        if (running) step(dt);
+        draw(); requestAnimationFrame(loop);
+      }
+      reset(); requestAnimationFrame(loop);
+    })();
+  </script>
+</body>
+
+</html>
